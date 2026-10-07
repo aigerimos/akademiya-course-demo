@@ -139,7 +139,7 @@
     if (!accountPanel) return;
     if (!cloud.isConfigured()) {
       accountPanel.innerHTML = `<div class="auth-status is-guest" aria-live="polite"><strong>Гостевой режим</strong>
-        <span>Прогресс сохраняется в этом браузере. Для облачного входа заполните URL и публичный ключ Supabase.</span></div>`;
+        <span>Прогресс сохраняется только в этом браузере.</span></div>`;
       return;
     }
 
