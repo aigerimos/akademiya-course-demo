@@ -10,6 +10,7 @@ test('progress schema constrains record types, values, and identity', () => {
   assert.match(schema, /references\s+auth\.users\s*\(\s*id\s*\)\s+on\s+delete\s+cascade/);
   assert.match(schema, /item_id\s*=\s*'latest'/);
   assert.match(schema, /score\s+between\s+0\s+and\s+5/);
+  assert.match(schema, /record_type\s*=\s*'quiz'[\s\S]*score\s+is\s+not\s+null[\s\S]*score\s+between\s+0\s+and\s+5/);
   assert.match(schema, /record_type\s*=\s*'lesson'[\s\S]*completed\s*=\s*true[\s\S]*score\s+is\s+null/);
 });
 

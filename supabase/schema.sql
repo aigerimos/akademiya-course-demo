@@ -10,7 +10,7 @@ create table if not exists public.academy_progress (
   check (
     (record_type = 'lesson' and item_id <> 'latest' and completed = true and score is null)
     or
-    (record_type = 'quiz' and item_id = 'latest' and completed = false and score between 0 and 5)
+    (record_type = 'quiz' and item_id = 'latest' and completed = false and score is not null and score between 0 and 5)
   )
 );
 
