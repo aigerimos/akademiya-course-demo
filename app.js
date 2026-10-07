@@ -63,6 +63,62 @@
     return `akademiya.progress.reset.${userId}`;
   }
 
+  function pendingMarkerKey(userId) {
+    return `akademiya.progress.pending.${userId}`;
+  }
+
+  function safeStorageRemove(key) {
+    try { if (storage) storage.removeItem(key); } catch { /* Keep the in-memory state usable. */ }
+  }
+
+  function readPendingChanges(userId) {
+    try {
+      const saved = safeStorageGet(pendingMarkerKey(userId));
+      const parsed = saved ? JSON.parse(saved) : null;
+      if (parsed && typeof parsed === 'object') {
+        return {
+          raw: saved,
+          snapshot: parsed.snapshot || { lessons: {}, quizzes: {} },
+          deletedLessons: Array.isArray(parsed.deletedLessons) ? parsed.deletedLessons : [],
+        };
+      }
+    } catch { /* A malformed retry marker is ignored; the local progress cache remains authoritative. */ }
+    return { raw: null, snapshot: { lessons: {}, quizzes: {} }, deletedLessons: [] };
+  }
+
+  function recordPendingChanges(userId, snapshot, deletedLesson = null) {
+    const previous = readPendingChanges(userId);
+    const deletedLessons = new Map(previous.deletedLessons
+      .filter((item) => item && item.courseId && item.lessonId)
+      .map((item) => [`${item.courseId}:${item.lessonId}`, item]));
+    for (const item of deletedLessons.values()) {
+      if (snapshot.lessons[item.courseId] && snapshot.lessons[item.courseId][item.lessonId]) {
+        deletedLessons.delete(`${item.courseId}:${item.lessonId}`);
+      }
+    }
+    if (deletedLesson) deletedLessons.set(`${deletedLesson.courseId}:${deletedLesson.lessonId}`, deletedLesson);
+    const pending = JSON.stringify({ snapshot, deletedLessons: [...deletedLessons.values()] });
+    safeStorageSet(pendingMarkerKey(userId), pending);
+    return pending;
+  }
+
+  function clearPendingChangesIfUnchanged(userId, raw) {
+    if (raw !== null && safeStorageGet(pendingMarkerKey(userId)) === raw) {
+      safeStorageRemove(pendingMarkerKey(userId));
+    }
+  }
+
+  function applyPendingChanges(snapshot, pending) {
+    const merged = mergeProgressStates(snapshot, pending.snapshot);
+    for (const item of pending.deletedLessons) {
+      if (merged.lessons[item.courseId]) {
+        delete merged.lessons[item.courseId][item.lessonId];
+        if (!Object.keys(merged.lessons[item.courseId]).length) delete merged.lessons[item.courseId];
+      }
+    }
+    return merged;
+  }
+
   function writeSnapshot(store, snapshot) {
     store.reset();
     for (const [courseId, lessonStates] of Object.entries(snapshot.lessons || {})) {
@@ -119,6 +175,8 @@
     const version = ++sessionVersion;
     currentSession = session || null;
     const user = currentSession && currentSession.user;
+    const nextUserId = user && user.id ? user.id : null;
+    if (activeUserId !== nextUserId) quizAttempt = null;
     if (!user || !user.id) {
       activeUserId = null;
       cloudReady = false;
@@ -155,11 +213,18 @@
       const resetPending = safeStorageGet(resetMarkerKey(user.id)) === 'true';
       const cloudState = resetPending ? { lessons: {}, quizzes: {} } : await cloud.loadProgress();
       if (version !== sessionVersion || activeUserId !== user.id) return;
-      const merged = resetPending ? cloudState : mergeProgressStates(localState, cloudState);
+      const pending = readPendingChanges(user.id);
+      const latestLocalState = progress.getSnapshot();
+      const merged = resetPending
+        ? latestLocalState
+        : applyPendingChanges(mergeProgressStates(latestLocalState, cloudState), pending);
       writeSnapshot(progress, merged);
-      await cloud.saveProgress(merged);
+      await cloud.saveProgress(merged, { replace: resetPending, deletedLessons: pending.deletedLessons });
       if (version !== sessionVersion || activeUserId !== user.id) return;
-      try { if (storage) storage.removeItem(resetMarkerKey(user.id)); } catch { /* Marker is harmless after a successful reset. */ }
+      if (resetPending) safeStorageRemove(resetMarkerKey(user.id));
+      clearPendingChangesIfUnchanged(user.id, pending.raw);
+      const pendingAfterSave = safeStorageGet(pendingMarkerKey(user.id));
+      if (pendingAfterSave && pendingAfterSave !== pending.raw) return syncCurrentUser();
       cloudReady = true;
       syncStatus = 'Синхронизировано';
       render();
@@ -178,40 +243,57 @@
     renderAuthPanel();
     try {
       let snapshot;
-      if (safeStorageGet(resetMarkerKey(userId)) === 'true') {
-        snapshot = { lessons: {}, quizzes: {} };
-      } else {
-        const cloudState = await cloud.loadProgress();
+      const resetPending = safeStorageGet(resetMarkerKey(userId)) === 'true';
+      let cloudState = { lessons: {}, quizzes: {} };
+      if (!resetPending) {
+        cloudState = await cloud.loadProgress();
         if (version !== sessionVersion || userId !== activeUserId) return;
-        snapshot = mergeProgressStates(progress.getSnapshot(), cloudState);
+      }
+      const pending = readPendingChanges(userId);
+      const latestLocalState = progress.getSnapshot();
+      if (resetPending) {
+        snapshot = latestLocalState;
+      } else {
+        snapshot = applyPendingChanges(mergeProgressStates(latestLocalState, cloudState), pending);
       }
       if (version !== sessionVersion || userId !== activeUserId) return;
       writeSnapshot(progress, snapshot);
-      await cloud.saveProgress(snapshot);
+      await cloud.saveProgress(snapshot, { replace: resetPending, deletedLessons: pending.deletedLessons });
       if (version !== sessionVersion || userId !== activeUserId) return;
-      try { if (storage) storage.removeItem(resetMarkerKey(userId)); } catch { /* Marker is harmless after a successful reset. */ }
+      if (resetPending) safeStorageRemove(resetMarkerKey(userId));
+      clearPendingChangesIfUnchanged(userId, pending.raw);
+      const pendingAfterSave = safeStorageGet(pendingMarkerKey(userId));
+      if (pendingAfterSave && pendingAfterSave !== pending.raw) return syncCurrentUser();
       cloudReady = true;
       syncStatus = 'Синхронизировано';
     } catch {
+      if (version !== sessionVersion || userId !== activeUserId) return;
       syncStatus = 'Ожидает синхронизации';
     }
     render();
   }
 
-  function queueCloudSync() {
+  function queueCloudSync({ deletedLesson = null } = {}) {
     if (!activeUserId || !currentSession || !cloud.isConfigured()) return;
+    const userId = activeUserId;
+    const version = sessionVersion;
+    const snapshot = progress.getSnapshot();
+    const pendingRaw = recordPendingChanges(userId, snapshot, deletedLesson);
     if (!cloudReady) {
       syncStatus = 'Ожидает синхронизации';
       renderAuthPanel();
       return;
     }
-    const userId = activeUserId;
-    const version = sessionVersion;
-    const snapshot = progress.getSnapshot();
     syncStatus = 'Синхронизируем…';
     renderAuthPanel();
-    cloud.saveProgress(snapshot).then(() => {
-      if (activeUserId === userId && sessionVersion === version) setSyncStatus('Синхронизировано');
+    const pending = readPendingChanges(userId);
+    cloud.saveProgress(snapshot, { deletedLessons: pending.deletedLessons }).then(() => {
+      if (activeUserId === userId && sessionVersion === version) {
+        clearPendingChangesIfUnchanged(userId, pendingRaw);
+        const pendingAfterSave = safeStorageGet(pendingMarkerKey(userId));
+        if (pendingAfterSave && pendingAfterSave !== pendingRaw) return syncCurrentUser();
+        setSyncStatus('Синхронизировано');
+      }
     }).catch(() => {
       if (activeUserId === userId && sessionVersion === version) setSyncStatus('Ожидает синхронизации');
     });
@@ -512,8 +594,9 @@
     if (event.target.closest('[data-mark-lesson]')) {
       const course = findCourse(selectedCourseId);
       const lesson = course.lessons[selectedLessonIndex];
-      progress.markLessonDone(course.id, lesson.id, !progress.isLessonDone(course.id, lesson.id));
-      queueCloudSync();
+      const wasDone = progress.isLessonDone(course.id, lesson.id);
+      progress.markLessonDone(course.id, lesson.id, !wasDone);
+      queueCloudSync({ deletedLesson: wasDone ? { courseId: course.id, lessonId: lesson.id } : null });
       return render();
     }
     if (event.target.closest('[data-retry]')) {

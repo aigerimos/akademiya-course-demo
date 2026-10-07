@@ -83,3 +83,45 @@ test('query errors are returned to caller', async () => {
   const { client } = createHarness({ queryError: new Error('network unavailable') });
   await assert.rejects(client.loadProgress(), /network unavailable/);
 });
+
+test('progress sync deletes explicitly unmarked lessons for the current user', async () => {
+  const { client, calls } = createHarness();
+  await client.saveProgress({ lessons: {}, quizzes: {} }, {
+    deletedLessons: [{ courseId: 'management-projects', lessonId: 'management-projects-lesson-1' }],
+  });
+
+  assert.deepEqual(calls.filter(([name]) => name === 'eq').map((call) => call.slice(1)), [
+    ['user_id', 'session-user-1'],
+    ['record_type', 'lesson'],
+    ['course_id', 'management-projects'],
+    ['item_id', 'management-projects-lesson-1'],
+  ]);
+});
+
+test('reset deletion waits for the earlier write to finish', async () => {
+  const events = [];
+  let releaseFirstWrite;
+  let writeCount = 0;
+  const table = {
+    upsert() {
+      events.push('upsert');
+      writeCount++;
+      if (writeCount === 1) return new Promise((resolve) => { releaseFirstWrite = () => resolve({ error: null }); });
+      return Promise.resolve({ error: null });
+    },
+    delete() { events.push('delete'); return { eq: () => Promise.resolve({ error: null }) }; },
+  };
+  const sdk = { createClient: () => ({
+    auth: { getSession: async () => ({ data: { session: { user: { id: 'session-user-1' } } }, error: null }) },
+    from: () => table,
+  }) };
+  const client = createSupabaseClient({ url: 'https://academy.supabase.co', key: 'public-key' }, sdk);
+  const oldWrite = client.saveProgress({ lessons: { 'management-projects': { 'management-projects-lesson-1': true } }, quizzes: {} });
+  const reset = client.saveProgress({ lessons: {}, quizzes: {} }, { replace: true });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ['upsert']);
+  releaseFirstWrite();
+  await Promise.all([oldWrite, reset]);
+  assert.deepEqual(events, ['upsert', 'delete']);
+});

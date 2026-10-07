@@ -4,10 +4,13 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const Academy = require('../academy.js');
 
-function createCloud({ initialSession = null, initialProgress = { lessons: {}, quizzes: {} }, failLoads = 0 } = {}) {
+function createCloud({ initialSession = null, initialProgress = { lessons: {}, quizzes: {} }, failLoads = 0, failSaves = 0, deferLoads = 0 } = {}) {
   let session = initialSession;
   let progress = structuredClone(initialProgress);
   let remainingLoadFailures = failLoads;
+  let remainingSaveFailures = failSaves;
+  let remainingDeferredLoads = deferLoads;
+  const waitingLoads = [];
   let authListener = null;
   const saves = [];
   const authCalls = [];
@@ -27,9 +30,30 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
     async signOut() { session = null; authListener('SIGNED_OUT', null); },
     async loadProgress() {
       if (remainingLoadFailures > 0) { remainingLoadFailures--; throw new Error('network unavailable'); }
+      if (remainingDeferredLoads > 0) {
+        remainingDeferredLoads--;
+        return new Promise((resolve) => waitingLoads.push(resolve));
+      }
       return structuredClone(progress);
     },
-    async saveProgress(snapshot) { progress = structuredClone(snapshot); saves.push(structuredClone(snapshot)); },
+    async saveProgress(snapshot, options = {}) {
+      saves.push({ snapshot: structuredClone(snapshot), options });
+      if (remainingSaveFailures > 0) { remainingSaveFailures--; throw new Error('network unavailable'); }
+      if (options.replace || (!Object.keys(snapshot.lessons || {}).length && !Object.keys(snapshot.quizzes || {}).length)) {
+        progress = { lessons: {}, quizzes: {} };
+      }
+      for (const item of options.deletedLessons || []) {
+        if (progress.lessons[item.courseId]) delete progress.lessons[item.courseId][item.lessonId];
+      }
+      for (const [courseId, lessons] of Object.entries(snapshot.lessons || {})) {
+        if (!progress.lessons[courseId]) progress.lessons[courseId] = {};
+        Object.assign(progress.lessons[courseId], lessons);
+      }
+      Object.assign(progress.quizzes, snapshot.quizzes || {});
+    },
+    async deleteProgressItem(recordType, courseId, itemId) {
+      if (recordType === 'lesson' && progress.lessons[courseId]) delete progress.lessons[courseId][itemId];
+    },
     switchUser(userId) {
       session = userId ? { user: { id: userId, email: `${userId}@example.com` } } : null;
       authListener(userId ? 'SIGNED_IN' : 'SIGNED_OUT', session);
@@ -39,6 +63,7 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
       authListener('PASSWORD_RECOVERY', session);
     },
     retryLoads() { remainingLoadFailures = 0; },
+    resolveLoad(snapshot = progress) { waitingLoads.shift()(structuredClone(snapshot)); },
     get progress() { return structuredClone(progress); },
     saves,
     authCalls,
@@ -105,6 +130,19 @@ function loadApp({ cloud = null } = {}) {
 
 async function flushApp() {
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+function submitAllCorrect(app, course) {
+  app.main.listeners.submit({
+    target: {
+      id: 'quiz-form',
+      querySelector(selector) {
+        const index = Number(selector.match(/question-(\d+)/)[1]);
+        return { value: String(course.quiz[index].answer) };
+      },
+    },
+    preventDefault() {},
+  });
 }
 
 test('opening a course quiz displays the quiz form', () => {
@@ -287,4 +325,88 @@ test('clicks inside the auth form do not trigger auth-mode navigation', () => {
   } });
 
   assert.equal(app.accountPanel.htmlWrites, rendersBefore);
+});
+
+test('lesson completed while the initial cloud load is pending is preserved', async () => {
+  const cloud = createCloud({ deferLoads: 1 });
+  const app = loadApp({ cloud });
+  await flushApp();
+  cloud.switchUser('user-1');
+  await flushApp();
+
+  app.click('[data-course]', { course: 'management-projects' });
+  app.click('[data-mark-lesson]');
+  cloud.resolveLoad({ lessons: {}, quizzes: {} });
+  await flushApp();
+
+  assert.equal(JSON.parse(app.values.get('akademiya.progress.user-1')).lessons['management-projects']['management-projects-lesson-1'], true);
+  assert.equal(cloud.progress.lessons['management-projects']['management-projects-lesson-1'], true);
+});
+
+test('online retry preserves a quiz result saved locally while offline', async () => {
+  const cloud = createCloud({ failLoads: 1, initialProgress: { lessons: {}, quizzes: { 'management-projects': 1 } } });
+  const app = loadApp({ cloud });
+  await flushApp();
+  cloud.switchUser('user-1');
+  await flushApp();
+  const course = Academy.institutes[0].courses[0];
+  app.click('[data-course]', { course: course.id });
+  app.click('[data-quiz]');
+  submitAllCorrect(app, course);
+  await flushApp();
+
+  app.window.listeners.online();
+  await flushApp();
+
+  assert.equal(JSON.parse(app.values.get('akademiya.progress.user-1')).quizzes[course.id], 5);
+  assert.equal(cloud.progress.quizzes[course.id], 5);
+});
+
+test('lesson completed after an offline reset is retained when sync resumes', async () => {
+  const cloud = createCloud({ failLoads: 1, initialProgress: {
+    lessons: { 'management-projects': { 'management-projects-lesson-2': true } }, quizzes: {},
+  }, failSaves: 1 });
+  const app = loadApp({ cloud });
+  await flushApp();
+  cloud.switchUser('user-1');
+  await flushApp();
+
+  app.reset.listeners.click();
+  await flushApp();
+  app.click('[data-course]', { course: 'management-projects' });
+  app.click('[data-mark-lesson]');
+  app.window.listeners.online();
+  await flushApp();
+
+  assert.equal(JSON.parse(app.values.get('akademiya.progress.user-1')).lessons['management-projects']['management-projects-lesson-1'], true);
+  assert.equal(cloud.progress.lessons['management-projects']['management-projects-lesson-1'], true);
+  assert.equal(cloud.progress.lessons['management-projects']['management-projects-lesson-2'], undefined);
+});
+
+test('unmarking a lesson removes its cloud record', async () => {
+  const cloud = createCloud({ initialSession: { user: { id: 'user-1', email: 'learner@example.com' } }, initialProgress: {
+    lessons: { 'management-projects': { 'management-projects-lesson-1': true } }, quizzes: {},
+  } });
+  const app = loadApp({ cloud });
+  await flushApp();
+  app.click('[data-course]', { course: 'management-projects' });
+  app.click('[data-mark-lesson]');
+  await flushApp();
+
+  assert.equal(cloud.progress.lessons['management-projects']['management-projects-lesson-1'], undefined);
+});
+
+test('logout clears the previous account quiz result from the screen', async () => {
+  const cloud = createCloud({ initialSession: { user: { id: 'user-1', email: 'learner@example.com' } } });
+  const app = loadApp({ cloud });
+  await flushApp();
+  const course = Academy.institutes[0].courses[0];
+  app.click('[data-course]', { course: course.id });
+  app.click('[data-quiz]');
+  submitAllCorrect(app, course);
+  await cloud.signOut();
+  await flushApp();
+
+  assert.match(app.main.innerHTML, /id="quiz-form"/);
+  assert.doesNotMatch(app.main.innerHTML, /class="result-score"/);
 });

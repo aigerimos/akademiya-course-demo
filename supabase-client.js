@@ -13,6 +13,7 @@
       || '';
     const configured = /^https:\/\//i.test(url) && Boolean(key) && Boolean(sdk && sdk.createClient);
     const client = configured ? sdk.createClient(url, key) : null;
+    let writeQueue = Promise.resolve();
 
     function requireClient() {
       if (!client) throw new Error('Облачный аккаунт не настроен. Продолжайте обучение как гость.');
@@ -108,14 +109,35 @@
         }
         return state;
       },
-      async saveProgress(snapshot) {
-        const user = await getCurrentUser();
-        const table = requireClient().from(TABLE);
-        const rows = progressRows(snapshot, user.id);
-        const result = rows.length
-          ? table.upsert(rows, { onConflict: 'user_id,record_type,course_id,item_id' })
-          : table.delete().eq('user_id', user.id);
-        await unwrap(result);
+      saveProgress(snapshot, options = {}) {
+        const expectedUser = getCurrentUser();
+        const operation = writeQueue.catch(() => {}).then(async () => {
+          const user = await expectedUser;
+          const currentUser = await getCurrentUser();
+          if (currentUser.id !== user.id) throw new Error('Аккаунт изменился до завершения синхронизации. Повторите попытку.');
+
+          const table = requireClient().from(TABLE);
+          const deletedLessons = Array.isArray(options.deletedLessons) ? options.deletedLessons : [];
+          if (options.replace || (!progressRows(snapshot, user.id).length && !deletedLessons.length)) {
+            await unwrap(table.delete().eq('user_id', user.id));
+          } else {
+            for (const item of deletedLessons) {
+              if (!item || typeof item.courseId !== 'string' || typeof item.lessonId !== 'string') continue;
+              await unwrap(table.delete()
+                .eq('user_id', user.id)
+                .eq('record_type', 'lesson')
+                .eq('course_id', item.courseId)
+                .eq('item_id', item.lessonId));
+            }
+          }
+
+          const rows = progressRows(snapshot, user.id);
+          if (rows.length) {
+            await unwrap(table.upsert(rows, { onConflict: 'user_id,record_type,course_id,item_id' }));
+          }
+        });
+        writeQueue = operation.catch(() => {});
+        return operation;
       },
     };
   }
