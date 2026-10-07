@@ -71,7 +71,7 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
   return cloud;
 }
 
-function loadApp({ cloud = null } = {}) {
+function loadApp({ cloud = null, initialValues = {} } = {}) {
   const elements = new Map();
   const createElement = () => ({
     _innerHTML: '',
@@ -99,7 +99,7 @@ function loadApp({ cloud = null } = {}) {
     getElementById: byId,
     querySelector: (selector) => selector === '.brand' ? brand : topbarLink,
   };
-  const values = new Map();
+  const values = new Map(Object.entries(initialValues));
   const window = {
     Academy,
     AcademySupabase: { createSupabaseClient: () => cloud || { isConfigured: () => false } },
@@ -409,4 +409,60 @@ test('logout clears the previous account quiz result from the screen', async () 
 
   assert.match(app.main.innerHTML, /id="quiz-form"/);
   assert.doesNotMatch(app.main.innerHTML, /class="result-score"/);
+});
+
+test('malformed pending-sync markers do not break account loading', async () => {
+  const cloud = createCloud({ initialSession: { user: { id: 'user-1', email: 'learner@example.com' } } });
+  const app = loadApp({ cloud, initialValues: {
+    'akademiya.progress.pending.user-1': JSON.stringify({
+      snapshot: { lessons: {}, quizzes: {} },
+      deletedLessons: [null, {}, { courseId: 'unknown-course', lessonId: 'unknown-lesson' }],
+    }),
+  } });
+  await flushApp();
+
+  assert.match(app.accountPanel.innerHTML, /Синхронизировано/);
+});
+
+test('reset invalidates a cloud load that started before the reset', async () => {
+  const oldProgress = { lessons: { 'management-projects': { 'management-projects-lesson-1': true } }, quizzes: {} };
+  const cloud = createCloud({
+    initialProgress: oldProgress,
+    deferLoads: 1,
+  });
+  const app = loadApp({ cloud });
+  await flushApp();
+  cloud.switchUser('user-1');
+  await flushApp();
+
+  app.reset.listeners.click();
+  await flushApp();
+  cloud.resolveLoad(oldProgress);
+  await flushApp();
+
+  assert.equal(app.values.get('akademiya.progress.user-1'), undefined);
+  assert.deepEqual(cloud.progress, { lessons: {}, quizzes: {} });
+});
+
+test('reset invalidates an online retry that started before the reset', async () => {
+  const oldProgress = { lessons: { 'management-projects': { 'management-projects-lesson-1': true } }, quizzes: {} };
+  const cloud = createCloud({
+    initialSession: { user: { id: 'user-1', email: 'learner@example.com' } },
+    initialProgress: oldProgress,
+    failLoads: 1,
+    deferLoads: 1,
+  });
+  const app = loadApp({ cloud });
+  await flushApp();
+  await flushApp();
+
+  app.window.listeners.online();
+  await flushApp();
+  app.reset.listeners.click();
+  await flushApp();
+  cloud.resolveLoad(oldProgress);
+  await flushApp();
+
+  assert.equal(app.values.get('akademiya.progress.user-1'), undefined);
+  assert.deepEqual(cloud.progress, { lessons: {}, quizzes: {} });
 });

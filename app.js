@@ -13,6 +13,7 @@
   let activeUserId = null;
   let cloudReady = false;
   let sessionVersion = 0;
+  let progressGeneration = 0;
   let authMode = 'signin';
   let authBusy = false;
   let authNotice = '';
@@ -76,10 +77,17 @@
       const saved = safeStorageGet(pendingMarkerKey(userId));
       const parsed = saved ? JSON.parse(saved) : null;
       if (parsed && typeof parsed === 'object') {
+        const deletedLessons = Array.isArray(parsed.deletedLessons)
+          ? parsed.deletedLessons.filter((item) => {
+            if (!item || typeof item.courseId !== 'string' || typeof item.lessonId !== 'string') return false;
+            const course = findCourse(item.courseId);
+            return Boolean(course && course.lessons.some((lesson) => lesson.id === item.lessonId));
+          })
+          : [];
         return {
           raw: saved,
-          snapshot: parsed.snapshot || { lessons: {}, quizzes: {} },
-          deletedLessons: Array.isArray(parsed.deletedLessons) ? parsed.deletedLessons : [],
+          snapshot: mergeProgressStates({ lessons: {}, quizzes: {} }, parsed.snapshot),
+          deletedLessons,
         };
       }
     } catch { /* A malformed retry marker is ignored; the local progress cache remains authoritative. */ }
@@ -173,6 +181,7 @@
 
   async function activateSession(session) {
     const version = ++sessionVersion;
+    const generation = progressGeneration;
     currentSession = session || null;
     const user = currentSession && currentSession.user;
     const nextUserId = user && user.id ? user.id : null;
@@ -212,7 +221,7 @@
     try {
       const resetPending = safeStorageGet(resetMarkerKey(user.id)) === 'true';
       const cloudState = resetPending ? { lessons: {}, quizzes: {} } : await cloud.loadProgress();
-      if (version !== sessionVersion || activeUserId !== user.id) return;
+      if (version !== sessionVersion || generation !== progressGeneration || activeUserId !== user.id) return;
       const pending = readPendingChanges(user.id);
       const latestLocalState = progress.getSnapshot();
       const merged = resetPending
@@ -220,7 +229,7 @@
         : applyPendingChanges(mergeProgressStates(latestLocalState, cloudState), pending);
       writeSnapshot(progress, merged);
       await cloud.saveProgress(merged, { replace: resetPending, deletedLessons: pending.deletedLessons });
-      if (version !== sessionVersion || activeUserId !== user.id) return;
+      if (version !== sessionVersion || generation !== progressGeneration || activeUserId !== user.id) return;
       if (resetPending) safeStorageRemove(resetMarkerKey(user.id));
       clearPendingChangesIfUnchanged(user.id, pending.raw);
       const pendingAfterSave = safeStorageGet(pendingMarkerKey(user.id));
@@ -239,6 +248,7 @@
     const userId = activeUserId;
     if (!userId || !currentSession || !cloud.isConfigured()) return;
     const version = sessionVersion;
+    const generation = progressGeneration;
     syncStatus = 'Синхронизируем…';
     renderAuthPanel();
     try {
@@ -247,7 +257,7 @@
       let cloudState = { lessons: {}, quizzes: {} };
       if (!resetPending) {
         cloudState = await cloud.loadProgress();
-        if (version !== sessionVersion || userId !== activeUserId) return;
+        if (version !== sessionVersion || generation !== progressGeneration || userId !== activeUserId) return;
       }
       const pending = readPendingChanges(userId);
       const latestLocalState = progress.getSnapshot();
@@ -256,10 +266,10 @@
       } else {
         snapshot = applyPendingChanges(mergeProgressStates(latestLocalState, cloudState), pending);
       }
-      if (version !== sessionVersion || userId !== activeUserId) return;
+      if (version !== sessionVersion || generation !== progressGeneration || userId !== activeUserId) return;
       writeSnapshot(progress, snapshot);
       await cloud.saveProgress(snapshot, { replace: resetPending, deletedLessons: pending.deletedLessons });
-      if (version !== sessionVersion || userId !== activeUserId) return;
+      if (version !== sessionVersion || generation !== progressGeneration || userId !== activeUserId) return;
       if (resetPending) safeStorageRemove(resetMarkerKey(userId));
       clearPendingChangesIfUnchanged(userId, pending.raw);
       const pendingAfterSave = safeStorageGet(pendingMarkerKey(userId));
@@ -267,7 +277,7 @@
       cloudReady = true;
       syncStatus = 'Синхронизировано';
     } catch {
-      if (version !== sessionVersion || userId !== activeUserId) return;
+      if (version !== sessionVersion || generation !== progressGeneration || userId !== activeUserId) return;
       syncStatus = 'Ожидает синхронизации';
     }
     render();
@@ -277,6 +287,7 @@
     if (!activeUserId || !currentSession || !cloud.isConfigured()) return;
     const userId = activeUserId;
     const version = sessionVersion;
+    const generation = progressGeneration;
     const snapshot = progress.getSnapshot();
     const pendingRaw = recordPendingChanges(userId, snapshot, deletedLesson);
     if (!cloudReady) {
@@ -288,14 +299,14 @@
     renderAuthPanel();
     const pending = readPendingChanges(userId);
     cloud.saveProgress(snapshot, { deletedLessons: pending.deletedLessons }).then(() => {
-      if (activeUserId === userId && sessionVersion === version) {
+      if (activeUserId === userId && sessionVersion === version && progressGeneration === generation) {
         clearPendingChangesIfUnchanged(userId, pendingRaw);
         const pendingAfterSave = safeStorageGet(pendingMarkerKey(userId));
         if (pendingAfterSave && pendingAfterSave !== pendingRaw) return syncCurrentUser();
         setSyncStatus('Синхронизировано');
       }
     }).catch(() => {
-      if (activeUserId === userId && sessionVersion === version) setSyncStatus('Ожидает синхронизации');
+      if (activeUserId === userId && sessionVersion === version && progressGeneration === generation) setSyncStatus('Ожидает синхронизации');
     });
   }
 
@@ -623,6 +634,7 @@
 
   document.getElementById('reset-progress').addEventListener('click', () => {
     if (!window.confirm('Сбросить отметки уроков и результаты тестов?')) return;
+    progressGeneration += 1;
     if (activeUserId) {
       safeStorageSet(resetMarkerKey(activeUserId), 'true');
       cloudReady = false;
