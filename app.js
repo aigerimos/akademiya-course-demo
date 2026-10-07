@@ -1,9 +1,22 @@
 (function startAcademyApp() {
-  const { institutes, gradeQuiz, createProgressStore } = window.Academy;
+  const { institutes, gradeQuiz, createProgressStore, mergeProgressStates } = window.Academy;
   const main = document.getElementById('main-content');
   const instituteNav = document.getElementById('sidebar-institutes');
+  const accountPanel = document.getElementById('account-panel');
   const storage = getBrowserStorage();
-  const progress = createProgressStore(storage);
+  const guestProgress = createProgressStore(storage);
+  let progress = guestProgress;
+  const cloud = window.AcademySupabase
+    ? window.AcademySupabase.createSupabaseClient(window.AcademySupabaseConfig || {})
+    : { isConfigured: () => false };
+  let currentSession = null;
+  let activeUserId = null;
+  let cloudReady = false;
+  let sessionVersion = 0;
+  let authMode = 'signin';
+  let authBusy = false;
+  let authNotice = '';
+  let syncStatus = 'Гостевой режим';
   let selectedInstituteId = institutes[0].id;
   let selectedCourseId = null;
   let selectedLessonIndex = 0;
@@ -28,6 +41,180 @@
 
   function findInstitute(instituteId) {
     return institutes.find((institute) => institute.id === instituteId) || institutes[0];
+  }
+
+  function safeStorageGet(key) {
+    try { return storage ? storage.getItem(key) : null; } catch { return null; }
+  }
+
+  function safeStorageSet(key, value) {
+    try { if (storage) storage.setItem(key, value); } catch { /* Keep the in-memory state usable. */ }
+  }
+
+  function userStorageKey(userId) {
+    return `akademiya.progress.${userId}`;
+  }
+
+  function migrationKey(userId) {
+    return `akademiya.progress.migrated.${userId}`;
+  }
+
+  function resetMarkerKey(userId) {
+    return `akademiya.progress.reset.${userId}`;
+  }
+
+  function writeSnapshot(store, snapshot) {
+    store.reset();
+    for (const [courseId, lessonStates] of Object.entries(snapshot.lessons || {})) {
+      for (const lessonId of Object.keys(lessonStates)) store.markLessonDone(courseId, lessonId, true);
+    }
+    for (const [courseId, score] of Object.entries(snapshot.quizzes || {})) store.saveQuizScore(courseId, score);
+  }
+
+  function renderAuthPanel() {
+    if (!accountPanel) return;
+    if (!cloud.isConfigured()) {
+      accountPanel.innerHTML = `<div class="auth-status is-guest" aria-live="polite"><strong>Гостевой режим</strong>
+        <span>Прогресс сохраняется в этом браузере. Для облачного входа заполните URL и публичный ключ Supabase.</span></div>`;
+      return;
+    }
+
+    const status = `<div class="sync-status" aria-live="polite"><span class="sync-indicator"></span>${escapeHtml(syncStatus)}</div>`;
+    if (authMode === 'recovery') {
+      accountPanel.innerHTML = `<form id="auth-form" class="auth-form auth-recovery" data-auth-mode="recovery">
+        <label class="visually-hidden" for="auth-password">Новый пароль</label>
+        <input id="auth-password" name="password" type="password" autocomplete="new-password" minlength="6" required placeholder="Новый пароль">
+        <button class="auth-primary-button" type="submit" ${authBusy ? 'disabled' : ''}>Сохранить</button>
+        ${status}</form>${authNotice ? `<p class="auth-notice" role="status">${escapeHtml(authNotice)}</p>` : ''}`;
+      return;
+    }
+    if (currentSession && currentSession.user) {
+      accountPanel.innerHTML = `<div class="account-summary"><div class="account-identity"><span class="account-avatar" aria-hidden="true">${escapeHtml((currentSession.user.email || 'А').slice(0, 1).toUpperCase())}</span>
+        <span><strong>${escapeHtml(currentSession.user.email || 'Ваш аккаунт')}</strong>${status}</span></div>
+        <button class="auth-secondary-button" type="button" data-signout ${authBusy ? 'disabled' : ''}>Выйти</button></div>
+        ${authNotice ? `<p class="auth-notice" role="status">${escapeHtml(authNotice)}</p>` : ''}`;
+      return;
+    }
+
+    const showPassword = authMode !== 'reset';
+    const action = authMode === 'signup' ? 'Создать аккаунт' : authMode === 'reset' ? 'Отправить ссылку' : 'Войти';
+    accountPanel.innerHTML = `<form id="auth-form" class="auth-form" data-auth-mode="${authMode}">
+      <label class="visually-hidden" for="auth-email">Email</label>
+      <input id="auth-email" name="email" type="email" autocomplete="email" required placeholder="Email" aria-label="Email">
+      ${showPassword ? '<label class="visually-hidden" for="auth-password">Пароль</label><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6" required placeholder="Пароль" aria-label="Пароль">' : ''}
+      <button class="auth-primary-button" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Подождите…' : action}</button>
+      ${status}</form>
+      <div class="auth-mode-links">${authMode === 'signin'
+        ? '<button type="button" data-auth-mode="signup">Регистрация</button><button type="button" data-auth-mode="reset">Забыли пароль?</button>'
+        : '<button type="button" data-auth-mode="signin">Войти</button>'}</div>
+      ${authNotice ? `<p class="auth-notice" role="status">${escapeHtml(authNotice)}</p>` : ''}`;
+  }
+
+  function setSyncStatus(value) {
+    syncStatus = value;
+    renderAuthPanel();
+  }
+
+  async function activateSession(session) {
+    const version = ++sessionVersion;
+    currentSession = session || null;
+    const user = currentSession && currentSession.user;
+    if (!user || !user.id) {
+      activeUserId = null;
+      cloudReady = false;
+      progress = guestProgress;
+      authMode = 'signin';
+      authNotice = '';
+      syncStatus = 'Гостевой режим';
+      render();
+      return;
+    }
+
+    if (activeUserId === user.id && cloudReady) {
+      currentSession = session;
+      renderAuthPanel();
+      return;
+    }
+
+    activeUserId = user.id;
+    cloudReady = false;
+    authMode = authMode === 'recovery' ? 'recovery' : 'signin';
+    authNotice = '';
+    progress = createProgressStore(storage, userStorageKey(user.id));
+    const accountCache = progress.getSnapshot();
+    const alreadyMigrated = safeStorageGet(migrationKey(user.id)) === 'true';
+    const localState = alreadyMigrated
+      ? accountCache
+      : mergeProgressStates(guestProgress.getSnapshot(), accountCache);
+    writeSnapshot(progress, localState);
+    safeStorageSet(migrationKey(user.id), 'true');
+    syncStatus = 'Синхронизируем…';
+    render();
+
+    try {
+      const resetPending = safeStorageGet(resetMarkerKey(user.id)) === 'true';
+      const cloudState = resetPending ? { lessons: {}, quizzes: {} } : await cloud.loadProgress();
+      if (version !== sessionVersion || activeUserId !== user.id) return;
+      const merged = resetPending ? cloudState : mergeProgressStates(localState, cloudState);
+      writeSnapshot(progress, merged);
+      await cloud.saveProgress(merged);
+      if (version !== sessionVersion || activeUserId !== user.id) return;
+      try { if (storage) storage.removeItem(resetMarkerKey(user.id)); } catch { /* Marker is harmless after a successful reset. */ }
+      cloudReady = true;
+      syncStatus = 'Синхронизировано';
+      render();
+    } catch {
+      if (version !== sessionVersion || activeUserId !== user.id) return;
+      syncStatus = 'Ожидает синхронизации';
+      render();
+    }
+  }
+
+  async function syncCurrentUser() {
+    const userId = activeUserId;
+    if (!userId || !currentSession || !cloud.isConfigured()) return;
+    const version = sessionVersion;
+    syncStatus = 'Синхронизируем…';
+    renderAuthPanel();
+    try {
+      let snapshot;
+      if (safeStorageGet(resetMarkerKey(userId)) === 'true') {
+        snapshot = { lessons: {}, quizzes: {} };
+      } else {
+        const cloudState = await cloud.loadProgress();
+        if (version !== sessionVersion || userId !== activeUserId) return;
+        snapshot = mergeProgressStates(progress.getSnapshot(), cloudState);
+      }
+      if (version !== sessionVersion || userId !== activeUserId) return;
+      writeSnapshot(progress, snapshot);
+      await cloud.saveProgress(snapshot);
+      if (version !== sessionVersion || userId !== activeUserId) return;
+      try { if (storage) storage.removeItem(resetMarkerKey(userId)); } catch { /* Marker is harmless after a successful reset. */ }
+      cloudReady = true;
+      syncStatus = 'Синхронизировано';
+    } catch {
+      syncStatus = 'Ожидает синхронизации';
+    }
+    render();
+  }
+
+  function queueCloudSync() {
+    if (!activeUserId || !currentSession || !cloud.isConfigured()) return;
+    if (!cloudReady) {
+      syncStatus = 'Ожидает синхронизации';
+      renderAuthPanel();
+      return;
+    }
+    const userId = activeUserId;
+    const version = sessionVersion;
+    const snapshot = progress.getSnapshot();
+    syncStatus = 'Синхронизируем…';
+    renderAuthPanel();
+    cloud.saveProgress(snapshot).then(() => {
+      if (activeUserId === userId && sessionVersion === version) setSyncStatus('Синхронизировано');
+    }).catch(() => {
+      if (activeUserId === userId && sessionVersion === version) setSyncStatus('Ожидает синхронизации');
+    });
   }
 
   function escapeHtml(value) {
@@ -117,7 +304,7 @@
           <div class="progress-banner-mark" aria-hidden="true">✳</div>
           <div class="progress-banner-copy"><span>ВАШИ УСПЕХИ</span>
             <strong>${completed ? `Уже пройдено уроков: ${completed}` : 'Любое большое знание начинается с первого шага'}</strong>
-            <p>Сохраняйте свой темп — прогресс останется с вами в этом браузере.</p></div>
+            <p>${activeUserId ? 'Прогресс синхронизируется с вашим аккаунтом.' : 'Прогресс сохранится в этом браузере.'}</p></div>
           <div class="banner-progress"><strong>${Math.round(getOverallProgress() * 100)}%</strong><span>всей программы</span></div>
         </section>
       </div>`;
@@ -246,6 +433,7 @@
   }
 
   function render() {
+    renderAuthPanel();
     renderInstituteNav();
     updateSidebarProgress();
     if (!selectedCourseId) {
@@ -325,6 +513,7 @@
       const course = findCourse(selectedCourseId);
       const lesson = course.lessons[selectedLessonIndex];
       progress.markLessonDone(course.id, lesson.id, !progress.isLessonDone(course.id, lesson.id));
+      queueCloudSync();
       return render();
     }
     if (event.target.closest('[data-retry]')) {
@@ -344,15 +533,79 @@
     });
     quizAttempt = gradeQuiz(course, answers);
     progress.saveQuizScore(course.id, quizAttempt.score);
+    queueCloudSync();
     render();
     main.focus({ preventScroll: true });
   });
 
   document.getElementById('reset-progress').addEventListener('click', () => {
     if (!window.confirm('Сбросить отметки уроков и результаты тестов?')) return;
+    if (activeUserId) {
+      safeStorageSet(resetMarkerKey(activeUserId), 'true');
+      cloudReady = false;
+    }
     progress.reset();
     quizAttempt = null;
     render();
+    if (activeUserId) syncCurrentUser();
+  });
+
+  accountPanel.addEventListener('click', async (event) => {
+    const modeButton = event.target.closest('[data-auth-mode]');
+    if (modeButton) {
+      authMode = modeButton.dataset.authMode;
+      authNotice = '';
+      renderAuthPanel();
+      return;
+    }
+    if (!event.target.closest('[data-signout]')) return;
+    authBusy = true;
+    authNotice = '';
+    renderAuthPanel();
+    try {
+      await cloud.signOut();
+    } catch (error) {
+      authNotice = error.message || 'Не удалось выйти из аккаунта.';
+    } finally {
+      authBusy = false;
+      renderAuthPanel();
+    }
+  });
+
+  accountPanel.addEventListener('submit', async (event) => {
+    if (event.target.id !== 'auth-form') return;
+    event.preventDefault();
+    const mode = event.target.dataset.authMode;
+    const emailField = event.target.querySelector('[name="email"]');
+    const passwordField = event.target.querySelector('[name="password"]');
+    const email = emailField ? emailField.value.trim() : '';
+    const password = passwordField ? passwordField.value : '';
+    authBusy = true;
+    authNotice = '';
+    renderAuthPanel();
+    try {
+      if (mode === 'signup') {
+        const result = await cloud.signUp(email, password);
+        authNotice = result && result.session
+          ? 'Аккаунт создан. Загружаем ваш прогресс…'
+          : 'Проверьте почту и подтвердите регистрацию.';
+      } else if (mode === 'reset') {
+        await cloud.sendPasswordReset(email);
+        authNotice = 'Если адрес зарегистрирован, на него отправлена ссылка для сброса пароля.';
+      } else if (mode === 'recovery') {
+        await cloud.updatePassword(password);
+        authMode = 'signin';
+        authNotice = 'Пароль обновлён.';
+      } else {
+        await cloud.signIn(email, password);
+        authNotice = 'Выполняется вход…';
+      }
+    } catch (error) {
+      authNotice = error && error.message ? error.message : 'Не удалось выполнить запрос. Попробуйте ещё раз.';
+    } finally {
+      authBusy = false;
+      renderAuthPanel();
+    }
   });
 
   document.querySelector('.topbar-link').addEventListener('click', (event) => {
@@ -371,6 +624,29 @@
     render();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
+
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('online', syncCurrentUser);
+  }
+
+  if (cloud.isConfigured()) {
+    try {
+      cloud.onAuthStateChange((event, session) => {
+        if (event === 'PASSWORD_RECOVERY') authMode = 'recovery';
+        Promise.resolve().then(() => activateSession(session));
+      });
+      const initialSessionVersion = sessionVersion;
+      cloud.getSession().then((session) => {
+        if (sessionVersion === initialSessionVersion) return activateSession(session);
+      }).catch(() => {
+        syncStatus = 'Ожидает синхронизации';
+        renderAuthPanel();
+      });
+    } catch (error) {
+      syncStatus = 'Ожидает синхронизации';
+      authNotice = error.message || '';
+    }
+  }
 
   render();
 })();
