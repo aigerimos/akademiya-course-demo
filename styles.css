@@ -285,11 +285,13 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
   .topbar { min-height: 66px; height: auto; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
   .topbar-center { display: none; }
   .topbar-link { font-size: 11px; }
-  .account-panel { order: 3; max-width: none; width: 100%; justify-content: space-between; }
-  .auth-form { flex: 1; }
-  .auth-form input { width: auto; flex: 1; min-width: 75px; }
-  .auth-mode-links { flex-direction: row; gap: 10px; }
-  .auth-status { max-width: 48%; font-size: 8px; }
+  .account-panel { order: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto; max-width: none; width: 100%; gap: 5px 10px; }
+  .auth-form { display: grid; grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; width: 100%; gap: 6px; }
+  .auth-form input { width: 100%; min-width: 0; }
+  .auth-form[data-auth-mode="reset"], .auth-form.auth-recovery { grid-template-columns: minmax(0, 1fr) auto; }
+  .auth-form .sync-status { grid-column: 1 / -1; }
+  .auth-mode-links { grid-column: 1 / -1; flex-direction: row; gap: 12px; }
+  .auth-status { grid-column: 1 / -1; max-width: none; font-size: 8px; }
   .auth-status span { max-width: 100%; }
   .account-summary { width: 100%; justify-content: space-between; }
   .account-identity strong { max-width: 190px; }
