@@ -15,7 +15,8 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
     isConfigured: () => true,
     getSession: async () => session,
     onAuthStateChange(callback) { authListener = callback; return { unsubscribe() {} }; },
-    async signIn() {
+    async signIn(email = 'learner@example.com', password = 'long-password') {
+      authCalls.push(['signIn', email, password]);
       session = { user: { id: 'user-1', email: 'learner@example.com' } };
       authListener('SIGNED_IN', session);
       return { session };
@@ -262,9 +263,14 @@ test('auth panel supports registration, password reset, and recovery password up
   await submitAuth('reset');
   assert.deepEqual(cloud.authCalls[1], ['reset', 'learner@example.com']);
 
+  clickAuthMode('signin');
+  await submitAuth('signin');
+  await flushApp();
+  assert.deepEqual(cloud.authCalls[2], ['signIn', 'learner@example.com', 'long-password']);
+
   cloud.beginRecovery();
   await flushApp();
   assert.match(app.accountPanel.innerHTML, /Новый пароль/);
   await submitAuth('recovery', { password: 'updated-password' });
-  assert.deepEqual(cloud.authCalls[2], ['updatePassword', 'updated-password']);
+  assert.deepEqual(cloud.authCalls[3], ['updatePassword', 'updated-password']);
 });
