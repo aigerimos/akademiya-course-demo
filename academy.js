@@ -218,6 +218,54 @@
 
   const STORAGE_KEY = 'akademiya.progress.v1';
 
+  function sanitizeProgressState(input) {
+    const safe = { lessons: {}, quizzes: {} };
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return safe;
+
+    if (input.lessons && typeof input.lessons === 'object' && !Array.isArray(input.lessons)) {
+      for (const [courseId, lessonStates] of Object.entries(input.lessons)) {
+        const course = courseIndex.get(courseId);
+        if (!course || !lessonStates || typeof lessonStates !== 'object' || Array.isArray(lessonStates)) continue;
+        for (const lesson of course.lessons) {
+          if (lessonStates[lesson.id] === true) {
+            if (!safe.lessons[courseId]) safe.lessons[courseId] = {};
+            safe.lessons[courseId][lesson.id] = true;
+          }
+        }
+      }
+    }
+
+    if (input.quizzes && typeof input.quizzes === 'object' && !Array.isArray(input.quizzes)) {
+      for (const [courseId, score] of Object.entries(input.quizzes)) {
+        const course = courseIndex.get(courseId);
+        if (course && Number.isInteger(score) && score >= 0 && score <= course.quiz.length) {
+          safe.quizzes[courseId] = score;
+        }
+      }
+    }
+
+    return safe;
+  }
+
+  function mergeProgressStates(local, cloud) {
+    const localState = sanitizeProgressState(local);
+    const cloudState = sanitizeProgressState(cloud);
+    const merged = { lessons: {}, quizzes: { ...localState.quizzes, ...cloudState.quizzes } };
+
+    for (const courseId of new Set([
+      ...Object.keys(localState.lessons),
+      ...Object.keys(cloudState.lessons),
+    ])) {
+      const completed = {
+        ...(localState.lessons[courseId] || {}),
+        ...(cloudState.lessons[courseId] || {}),
+      };
+      if (Object.keys(completed).length) merged.lessons[courseId] = completed;
+    }
+
+    return merged;
+  }
+
   function gradeQuiz(course, answers) {
     const questions = course.quiz.map((item, index) => {
       const selected = answers[index];
@@ -232,25 +280,20 @@
     return { score: questions.filter((item) => item.correct).length, questions };
   }
 
-  function createProgressStore(storage) {
+  function createProgressStore(storage, key = STORAGE_KEY) {
     let state = { lessons: {}, quizzes: {} };
 
     try {
-      const saved = storage && storage.getItem(STORAGE_KEY);
+      const saved = storage && storage.getItem(key);
       const parsed = saved ? JSON.parse(saved) : null;
-      if (parsed && typeof parsed === 'object') {
-        state = {
-          lessons: parsed.lessons && typeof parsed.lessons === 'object' ? parsed.lessons : {},
-          quizzes: parsed.quizzes && typeof parsed.quizzes === 'object' ? parsed.quizzes : {},
-        };
-      }
+      state = sanitizeProgressState(parsed);
     } catch {
       state = { lessons: {}, quizzes: {} };
     }
 
     function persist() {
       try {
-        if (storage) storage.setItem(STORAGE_KEY, JSON.stringify(state));
+        if (storage) storage.setItem(key, JSON.stringify(state));
       } catch {
         // Progress remains available for the current page if browser storage is unavailable.
       }
@@ -292,17 +335,21 @@
       return Number.isInteger(state.quizzes[courseId]) ? state.quizzes[courseId] : null;
     }
 
+    function getSnapshot() {
+      return JSON.parse(JSON.stringify(state));
+    }
+
     function reset() {
       state = { lessons: {}, quizzes: {} };
       try {
-        if (storage) storage.removeItem(STORAGE_KEY);
+        if (storage) storage.removeItem(key);
       } catch {
         // The in-memory state is still reset if browser storage is unavailable.
       }
     }
 
-    return { markLessonDone, isLessonDone, getCourseProgress, saveQuizScore, getQuizScore, reset };
+    return { markLessonDone, isLessonDone, getCourseProgress, saveQuizScore, getQuizScore, getSnapshot, reset };
   }
 
-  return { institutes, gradeQuiz, createProgressStore, storageKey: STORAGE_KEY };
+  return { institutes, gradeQuiz, createProgressStore, mergeProgressStates, storageKey: STORAGE_KEY };
 });
