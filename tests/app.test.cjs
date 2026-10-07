@@ -64,6 +64,7 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
     },
     retryLoads() { remainingLoadFailures = 0; },
     resolveLoad(snapshot = progress) { waitingLoads.shift()(structuredClone(snapshot)); },
+    deferNextLoad() { remainingDeferredLoads++; },
     get progress() { return structuredClone(progress); },
     saves,
     authCalls,
@@ -465,4 +466,27 @@ test('reset invalidates an online retry that started before the reset', async ()
 
   assert.equal(app.values.get('akademiya.progress.user-1'), undefined);
   assert.deepEqual(cloud.progress, { lessons: {}, quizzes: {} });
+});
+
+test('unmarking a lesson invalidates a delayed online read', async () => {
+  const oldProgress = { lessons: { 'management-projects': { 'management-projects-lesson-1': true } }, quizzes: {} };
+  const cloud = createCloud({
+    initialSession: { user: { id: 'user-1', email: 'learner@example.com' } },
+    initialProgress: oldProgress,
+  });
+  const app = loadApp({ cloud });
+  await flushApp();
+  await flushApp();
+
+  app.click('[data-course]', { course: 'management-projects' });
+  cloud.deferNextLoad();
+  app.window.listeners.online();
+  await flushApp();
+  app.click('[data-mark-lesson]');
+  await flushApp();
+  cloud.resolveLoad(oldProgress);
+  await flushApp();
+
+  assert.equal(cloud.progress.lessons['management-projects']['management-projects-lesson-1'], undefined);
+  assert.deepEqual(JSON.parse(app.values.get('akademiya.progress.user-1')).lessons['management-projects'], {});
 });

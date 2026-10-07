@@ -238,7 +238,7 @@
       syncStatus = 'Синхронизировано';
       render();
     } catch {
-      if (version !== sessionVersion || activeUserId !== user.id) return;
+      if (version !== sessionVersion || generation !== progressGeneration || activeUserId !== user.id) return;
       syncStatus = 'Ожидает синхронизации';
       render();
     }
@@ -287,12 +287,14 @@
     if (!activeUserId || !currentSession || !cloud.isConfigured()) return;
     const userId = activeUserId;
     const version = sessionVersion;
+    progressGeneration += 1;
     const generation = progressGeneration;
     const snapshot = progress.getSnapshot();
     const pendingRaw = recordPendingChanges(userId, snapshot, deletedLesson);
     if (!cloudReady) {
       syncStatus = 'Ожидает синхронизации';
       renderAuthPanel();
+      syncCurrentUser();
       return;
     }
     syncStatus = 'Синхронизируем…';
