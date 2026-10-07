@@ -105,8 +105,8 @@
       <button class="auth-primary-button" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Подождите…' : action}</button>
       ${status}</form>
       <div class="auth-mode-links">${authMode === 'signin'
-        ? '<button type="button" data-auth-mode="signup">Регистрация</button><button type="button" data-auth-mode="reset">Забыли пароль?</button>'
-        : '<button type="button" data-auth-mode="signin">Войти</button>'}</div>
+        ? '<button type="button" data-auth-mode-button="signup">Регистрация</button><button type="button" data-auth-mode-button="reset">Забыли пароль?</button>'
+        : '<button type="button" data-auth-mode-button="signin">Войти</button>'}</div>
       ${authNotice ? `<p class="auth-notice" role="status">${escapeHtml(authNotice)}</p>` : ''}`;
   }
 
@@ -551,9 +551,9 @@
   });
 
   accountPanel.addEventListener('click', async (event) => {
-    const modeButton = event.target.closest('[data-auth-mode]');
+    const modeButton = event.target.closest('[data-auth-mode-button]');
     if (modeButton) {
-      authMode = modeButton.dataset.authMode;
+      authMode = modeButton.dataset.authModeButton;
       authNotice = '';
       renderAuthPanel();
       return;

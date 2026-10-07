@@ -49,7 +49,10 @@ function createCloud({ initialSession = null, initialProgress = { lessons: {}, q
 function loadApp({ cloud = null } = {}) {
   const elements = new Map();
   const createElement = () => ({
-    innerHTML: '',
+    _innerHTML: '',
+    htmlWrites: 0,
+    get innerHTML() { return this._innerHTML; },
+    set innerHTML(value) { this._innerHTML = value; this.htmlWrites++; },
     textContent: '',
     style: {},
     listeners: {},
@@ -239,8 +242,8 @@ test('auth panel supports registration, password reset, and recovery password up
   const cloud = createCloud();
   const app = loadApp({ cloud });
   const clickAuthMode = (mode) => app.accountPanel.listeners.click({ target: {
-    dataset: { authMode: mode },
-    closest(selector) { return selector === '[data-auth-mode]' ? this : null; },
+    dataset: { authModeButton: mode },
+    closest(selector) { return selector === '[data-auth-mode-button]' ? this : null; },
   } });
   const submitAuth = async (mode, { email = 'learner@example.com', password = 'long-password' } = {}) => {
     const values = { email, password };
@@ -273,4 +276,15 @@ test('auth panel supports registration, password reset, and recovery password up
   assert.match(app.accountPanel.innerHTML, /Новый пароль/);
   await submitAuth('recovery', { password: 'updated-password' });
   assert.deepEqual(cloud.authCalls[3], ['updatePassword', 'updated-password']);
+});
+
+test('clicks inside the auth form do not trigger auth-mode navigation', () => {
+  const app = loadApp({ cloud: createCloud() });
+  const rendersBefore = app.accountPanel.htmlWrites;
+  const signInForm = { dataset: { authMode: 'signin' } };
+  app.accountPanel.listeners.click({ target: {
+    closest(selector) { return selector === '[data-auth-mode]' ? signInForm : null; },
+  } });
+
+  assert.equal(app.accountPanel.htmlWrites, rendersBefore);
 });
