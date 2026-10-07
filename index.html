@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f5f1">
+    <meta name="description" content="Короткие курсы по управлению, дипломатии и геополитике.">
+    <title>Академия — пространство знаний</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="academy.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-frame">
+      <header class="topbar">
+        <a class="brand" href="#home" aria-label="Академия — на главную">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+          <span class="brand-name">Академия<span class="brand-period">.</span></span>
+        </a>
+        <div class="topbar-center"><span class="status-dot"></span> Открытая учебная платформа</div>
+        <a class="topbar-link" href="#catalog">Моя программа <span aria-hidden="true">↗</span></a>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" aria-label="Навигация по обучению">
+          <div class="sidebar-kicker">ВАШ КАМПУС</div>
+          <div class="sidebar-heading">Направления</div>
+          <nav class="institute-list" id="sidebar-institutes" aria-label="Институты"></nav>
+
+          <div class="sidebar-rule"></div>
+          <div class="sidebar-kicker">МОЙ ПУТЬ</div>
+          <div class="sidebar-progress">
+            <div class="sidebar-progress-top"><span>Прогресс</span><strong id="overall-progress-value">0%</strong></div>
+            <div class="progress-track"><span id="overall-progress-bar"></span></div>
+            <p id="overall-progress-copy">Отметьте первый урок, чтобы начать</p>
+          </div>
+
+          <button class="reset-button" id="reset-progress" type="button">
+            <span aria-hidden="true">↺</span> Сбросить прогресс
+          </button>
+          <div class="sidebar-note"><span aria-hidden="true">✳</span> Ваш темп — ваш выбор</div>
+        </aside>
+
+        <main id="main-content" tabindex="-1">
+          <div class="loading-state" aria-live="polite">Загружаем пространство знаний…</div>
+        </main>
+      </div>
+
+      <footer class="footer">
+        <span>Академия <span class="brand-period">.</span></span>
+        <span>Учитесь в своём ритме</span>
+        <span>© 2026</span>
+      </footer>
+    </div>
+  </body>
+</html>
